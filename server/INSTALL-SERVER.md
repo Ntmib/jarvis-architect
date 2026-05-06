@@ -141,15 +141,20 @@ expect -c '
 '
 ```
 
-Скопируй по очереди:
+Скопируй по очереди все DNA-файлы (каждый — если существует локально):
 1. `CLAUDE.md`
 2. `SOUL.md`
 3. `MEMORY.md`
 4. `GOALS.md`
+5. `USER.md`
+6. `MISSION.md`
+7. `PROJECTS.md`
+8. `PREFERENCES.md`
+9. `LEARNED.md`
 
 Потом скопируй папки (рекурсивно, флаг -r):
-5. `memory/` → `/home/agent/workspace/memory/`
-6. `knowledge/` → `/home/agent/workspace/knowledge/`
+10. `memory/` → `/home/agent/workspace/memory/`
+11. `knowledge/` → `/home/agent/workspace/knowledge/`
 
 **Настройки Claude Code (.claude/):**
 7. Если у пользователя есть локальная папка `.claude/` — скопируй её в `/home/agent/.claude/` (НЕ в workspace!). Это настройки Claude Code: settings.json (правила светофора) и skills/ (навыки).
@@ -191,7 +196,7 @@ echo '=== Node.js ===' && node -v && echo '=== Claude Code ===' && which claude 
 
 **7.1. Скачай файлы бота из репозитория:**
 ```
-curl -fsSL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/index.js -o /home/agent/.agent/bot/index.js && curl -fsSL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/package.json -o /home/agent/.agent/bot/package.json && echo OK
+curl -fsSL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/index.js -o /home/agent/.agent/bot/index.js && curl -fsSL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/package.json -o /home/agent/.agent/bot/package.json && curl -fsSL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/CLAUDE-SYSTEM.md -o /home/agent/.agent/bot/CLAUDE-SYSTEM.md && echo OK
 ```
 
 **7.2. Установи зависимости:**

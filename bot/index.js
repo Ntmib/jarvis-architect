@@ -6,11 +6,12 @@
  *           sessions, DNA files, persistent keyboard, folder structure awareness
  */
 
-import { Bot, Keyboard } from "grammy";
+import { Bot, Keyboard, InputFile } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, renameSync, copyFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, renameSync, copyFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import https from "node:https";
@@ -26,6 +27,7 @@ const DATA_DIR = join(AGENT_HOME, ".agent");
 const MEDIA_DIR = join(WORKSPACE, ".media");
 const SESSIONS_FILE = join(DATA_DIR, "sessions.json");
 const OWNER_FILE = join(DATA_DIR, "owner.json");
+const SYSTEM_PROMPT_PATH = join(DATA_DIR, "bot", "CLAUDE-SYSTEM.md");
 
 if (!BOT_TOKEN) {
   console.error("BOT_TOKEN is required");
@@ -128,28 +130,62 @@ const ARCHITECTURE_CONTEXT = `
 - Медиафайлы от пользователя сохраняются в workspace/.media/ — используй Read для их чтения
 `;
 
-function buildSystemPrompt() {
-  const parts = [ARCHITECTURE_CONTEXT];
+const MAX_MEMORY_CHARS = 15000;
+const MAX_DIARY_CHARS = 2000;
 
-  // DNA files — read each if exists
-  const dnaFiles = ["SOUL.md", "MEMORY.md", "GOALS.md", "CLAUDE.md"];
+function _safeRead(path) {
+  try {
+    if (!existsSync(path)) return "";
+    return readFileSync(path, "utf8");
+  } catch { return ""; }
+}
+
+function buildSystemPrompt() {
+  const parts = [];
+
+  // 1. CLAUDE-SYSTEM.md — main rules (media tags, formatting, etc.)
+  const sysRules = _safeRead(SYSTEM_PROMPT_PATH);
+  if (sysRules) parts.push(sysRules);
+
+  // 2. Architecture context
+  parts.push(ARCHITECTURE_CONTEXT);
+
+  // 3. All 8 DNA files
+  const dnaFiles = [
+    "SOUL.md", "USER.md", "MEMORY.md", "MISSION.md",
+    "GOALS.md", "PROJECTS.md", "PREFERENCES.md", "LEARNED.md", "CLAUDE.md",
+  ];
   for (const name of dnaFiles) {
-    const path = join(WORKSPACE, name);
-    if (existsSync(path)) {
-      try {
-        parts.push(`--- ${name} ---\n${readFileSync(path, "utf8")}`);
-      } catch {}
+    const text = _safeRead(join(WORKSPACE, name));
+    if (text) {
+      const trimmed = name === "MEMORY.md" && text.length > MAX_MEMORY_CHARS
+        ? text.slice(0, MAX_MEMORY_CHARS) + "\n...(truncated)"
+        : text;
+      parts.push(`--- ${name} ---\n${trimmed}`);
     }
   }
 
-  // Today's diary
+  // 4. Today's diary
   const today = new Date().toISOString().split("T")[0];
-  const diaryPath = join(WORKSPACE, "memory", `${today}.md`);
-  if (existsSync(diaryPath)) {
-    try {
-      parts.push(`--- Дневник ${today} ---\n${readFileSync(diaryPath, "utf8")}`);
-    } catch {}
+  const todayText = _safeRead(join(WORKSPACE, "memory", `${today}.md`));
+  if (todayText) {
+    const d = todayText.length > MAX_DIARY_CHARS ? todayText.slice(-MAX_DIARY_CHARS) : todayText;
+    parts.push(`--- Дневник ${today} ---\n${d}`);
   }
+
+  // 5. Yesterday's diary
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yStr = yesterday.toISOString().split("T")[0];
+  const yText = _safeRead(join(WORKSPACE, "memory", `${yStr}.md`));
+  if (yText) {
+    const d = yText.length > MAX_DIARY_CHARS ? yText.slice(-MAX_DIARY_CHARS) : yText;
+    parts.push(`--- Дневник ${yStr} ---\n${d}`);
+  }
+
+  // 6. Current date + memory nudge
+  parts.push(`# Current date\n${today}`);
+  parts.push("# Memory reminder\nЕсли в этом диалоге появились важные факты, решения или предпочтения клиента — сохрани их в memory/YYYY-MM-DD.md или MEMORY.md. Не теряй контекст между сессиями.");
 
   return parts.join("\n\n");
 }
@@ -434,6 +470,76 @@ function mdToTgHtml(text) {
   return result;
 }
 
+// ─── MEDIA TAGS (Claude → Telegram file sending) ────────────────────────────
+
+const MEDIA_TAG_RE = /\[(ФОТО|ФАЙЛ|СТИКЕР|ВИДЕО|АУДИО|ГОЛОС|GIF|PHOTO|FILE|STICKER|VIDEO|AUDIO|VOICE|ANIMATION):\s*([^\]\s]+)(?:\s+([^\]]*))?\]/gi;
+
+const MEDIA_TYPE_MAP = {
+  "ФОТО": "photo", "PHOTO": "photo",
+  "ФАЙЛ": "document", "FILE": "document",
+  "СТИКЕР": "sticker", "STICKER": "sticker",
+  "ВИДЕО": "video", "VIDEO": "video",
+  "АУДИО": "audio", "AUDIO": "audio",
+  "ГОЛОС": "voice", "VOICE": "voice",
+  "GIF": "animation", "ANIMATION": "animation",
+};
+
+function extractMediaTags(text) {
+  const media = [];
+  const cleaned = text.replace(MEDIA_TAG_RE, (_, type, path, caption) => {
+    let filePath = path.trim();
+    let fileCaption = caption?.trim()?.slice(0, 1024) || undefined;
+
+    if (!filePath.startsWith("http") && !existsSync(filePath) && fileCaption) {
+      const fullPath = (filePath + " " + fileCaption).replace(/\s+$/, "");
+      if (existsSync(fullPath)) {
+        filePath = fullPath;
+        fileCaption = undefined;
+      }
+    }
+
+    media.push({
+      type: MEDIA_TYPE_MAP[type.toUpperCase()] || "document",
+      path: filePath,
+      caption: fileCaption,
+    });
+    return "";
+  });
+  return { cleaned: cleaned.trim(), media };
+}
+
+async function sendMediaItem(ctx, item) {
+  try {
+    const isUrl = /^https?:\/\//i.test(item.path);
+    let source;
+    if (isUrl) {
+      source = item.path;
+    } else if (existsSync(item.path)) {
+      const buf = await readFile(item.path);
+      source = new InputFile(buf, basename(item.path));
+    } else {
+      await ctx.reply(`Файл не найден: ${item.path}`);
+      return;
+    }
+    const opts = {};
+    if (item.caption && item.type !== "sticker") opts.caption = item.caption;
+
+    switch (item.type) {
+      case "photo": await ctx.replyWithPhoto(source, opts); break;
+      case "document": await ctx.replyWithDocument(source, opts); break;
+      case "voice": await ctx.replyWithVoice(source, opts); break;
+      case "video": await ctx.replyWithVideo(source, opts); break;
+      case "audio": await ctx.replyWithAudio(source, opts); break;
+      case "animation": await ctx.replyWithAnimation(source, opts); break;
+      case "sticker": await ctx.replyWithSticker(source); break;
+      default: await ctx.replyWithDocument(source, opts);
+    }
+  } catch (e) {
+    console.error(`[media] Failed to send ${item.type} ${item.path}:`, e.message);
+    await ctx.reply(`Не удалось отправить: ${basename(item.path)}`).catch(() => {});
+  }
+}
+
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 function getStatusText() {
@@ -523,7 +629,9 @@ function getMemoryText() {
 }
 
 async function sendResponse(ctx, text) {
-  const html = mdToTgHtml(text);
+  // Extract media tags before formatting
+  const { cleaned, media } = extractMediaTags(text);
+  const html = mdToTgHtml(cleaned);
 
   if (html.length <= 4096) {
     try {
@@ -554,6 +662,11 @@ async function sendResponse(ctx, text) {
         await ctx.reply(parts[i].replace(/<[^>]+>/g, ""), markup);
       }
     }
+  }
+
+  // Send media files after text
+  for (const item of media) {
+    await sendMediaItem(ctx, item);
   }
 }
 
