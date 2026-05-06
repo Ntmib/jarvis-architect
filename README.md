@@ -159,10 +159,19 @@ jarvis-architect/
 │   └── s                  ← копия setup-server.sh для GitHub Pages
 └── .claude/
     ├── CLAUDE.md           ← проектные инструкции для Claude Code
+    ├── settings.json       ← настройки разрешений (светофор) + плагин Superpowers
     └── skills/
         ├── README.md       ← гайд по скиллам (урок 5)
-        └── server-setup/
-            └── SKILL.md    ← скилл установки на VPS
+        ├── server-setup/
+        │   └── SKILL.md    ← скилл установки на VPS
+        ├── discovery-interview/
+        │   └── SKILL.md    ← сбор ТЗ через интервью
+        ├── content-creator/
+        │   └── SKILL.md    ← написание контента
+        ├── fullstack-developer/
+        │   └── SKILL.md    ← разработка кода
+        └── frontend-design/
+            └── SKILL.md    ← дизайн интерфейсов
 ```
 
 ---
@@ -179,9 +188,9 @@ npx degit Ntmib/jarvis-architect .
 
 ## Что дальше
 
-- **Урок 5** — добавим команду подчинённых
-- **Урок 6** — подключим Агента к Telegram
-- **Урок 7** — переедем на свой сервер (эта инструкция)
+- **Урок 5** — добавим команду подчинённых (скиллы уже предустановлены, можно добавить свои)
+- **Урок 6** — подключим Агента к Telegram (бот в папке bot/)
+- **Урок 7** — переедем на свой сервер (инструкция в server/INSTALL-SERVER.md)
 
 ## Лицензия
 
