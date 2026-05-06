@@ -1,15 +1,15 @@
 /**
- * Agent Bot — minimal Telegram bot powered by Claude Code CLI
+ * Agent Bot — Telegram bot powered by Claude Code CLI
  * Part of jarvis-architect: personal AI agent for course students
  *
- * Features: text + voice → Claude Code → response, sessions, DNA files,
- *           persistent keyboard, folder structure awareness, typing animation
+ * Features: text + voice + photos + documents + media groups → Claude Code → response
+ *           sessions, DNA files, persistent keyboard, folder structure awareness
  */
 
 import { Bot, Keyboard } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
@@ -19,10 +19,12 @@ import http from "node:http";
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const OWNER_ID = process.env.OWNER_ID || null; // Telegram ID владельца (если задан — бот отвечает только ему)
 const AGENT_HOME = process.env.AGENT_HOME || "/home/agent";
 const WORKSPACE = join(AGENT_HOME, "workspace");
 const PROJECTS = join(AGENT_HOME, "projects");
 const DATA_DIR = join(AGENT_HOME, ".agent");
+const MEDIA_DIR = join(WORKSPACE, ".media");
 const SESSIONS_FILE = join(DATA_DIR, "sessions.json");
 
 if (!BOT_TOKEN) {
@@ -31,8 +33,15 @@ if (!BOT_TOKEN) {
 }
 
 // Ensure directories exist
-for (const dir of [DATA_DIR, join(WORKSPACE, "memory"), join(WORKSPACE, "knowledge"), PROJECTS]) {
+for (const dir of [DATA_DIR, join(WORKSPACE, "memory"), join(WORKSPACE, "knowledge"), PROJECTS, MEDIA_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+// ─── OWNER CHECK ────────────────────────────────────────────────────────────
+
+function isOwner(ctx) {
+  if (!OWNER_ID) return true; // Если OWNER_ID не задан — бот открыт для всех
+  return String(ctx.from?.id) === String(OWNER_ID);
 }
 
 // ─── PERSISTENT KEYBOARD ────────────────────────────────────────────────────
@@ -70,25 +79,27 @@ const ARCHITECTURE_CONTEXT = `
 
 Ты работаешь на VPS-сервере. Вот структура папок:
 
-/home/agent/                    ← твой дом на сервере
-├── .claude/                    ← настройки Claude Code
-│   ├── settings.json           ← правила светофора (зелёный/жёлтый/красный)
-│   └── skills/                 ← навыки (скиллы)
-├── workspace/                  ← главная рабочая папка (cwd)
-│   ├── CLAUDE.md               ← правила работы
-│   ├── SOUL.md                 ← твоя личность
-│   ├── MEMORY.md               ← долгосрочная память (обновляй!)
-│   ├── GOALS.md                ← цели пользователя
-│   ├── memory/                 ← дневники по дням (YYYY-MM-DD.md)
-│   └── knowledge/              ← база знаний (справочники, инструкции)
-├── projects/                   ← папка для ПРОЕКТОВ
-└── .agent/                     ← служебная папка бота (не трогай)
+/home/agent/                    <- твой дом на сервере
+|-- .claude/                    <- настройки Claude Code
+|   |-- settings.json           <- правила светофора (зелёный/жёлтый/красный)
+|   +-- skills/                 <- навыки (скиллы)
+|-- workspace/                  <- главная рабочая папка (cwd)
+|   |-- CLAUDE.md               <- правила работы
+|   |-- SOUL.md                 <- твоя личность
+|   |-- MEMORY.md               <- долгосрочная память (обновляй!)
+|   |-- GOALS.md                <- цели пользователя
+|   |-- .media/                 <- медиафайлы от пользователя (фото, документы)
+|   |-- memory/                 <- дневники по дням (YYYY-MM-DD.md)
+|   +-- knowledge/              <- база знаний (справочники, инструкции)
+|-- projects/                   <- папка для ПРОЕКТОВ
++-- .agent/                     <- служебная папка бота (не трогай)
 
 ВАЖНО:
 - Новые проекты ВСЕГДА создавай в /home/agent/projects/название-проекта/, НЕ в workspace/
 - Workspace — только для DNA-файлов и памяти
 - Скиллы лежат в /home/agent/.claude/skills/ — если пользователь просит установить скилл, клади туда
 - Настройки Claude Code (settings.json) — в /home/agent/.claude/
+- Медиафайлы от пользователя сохраняются в workspace/.media/ — используй Read для их чтения
 `;
 
 function buildSystemPrompt() {
@@ -176,9 +187,9 @@ function _callClaudeInner(prompt, sessionId) {
   });
 }
 
-// ─── VOICE HANDLING ──────────────────────────────────────────────────────────
+// ─── FILE DOWNLOAD ──────────────────────────────────────────────────────────
 
-async function downloadFile(url, destPath) {
+async function downloadTgFile(url, destPath) {
   const proto = url.startsWith("https") ? https : http;
   const response = await new Promise((resolve, reject) => {
     proto.get(url, (res) => {
@@ -188,6 +199,134 @@ async function downloadFile(url, destPath) {
   });
   await pipeline(response, createWriteStream(destPath));
 }
+
+async function downloadAndSave(ctx, fileId, ext) {
+  const file = await ctx.api.getFile(fileId);
+  const tmpPath = `/tmp/media_${Date.now()}_${fileId.slice(-8)}${ext}`;
+  const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  await downloadTgFile(fileUrl, tmpPath);
+
+  // Move to persistent .media/ directory
+  const destPath = join(MEDIA_DIR, `${Date.now()}_${fileId.slice(-8)}${ext}`);
+  renameSync(tmpPath, destPath);
+  return destPath;
+}
+
+// ─── MEDIA BATCH (for handling multiple photos at once) ─────────────────────
+
+const MEDIA_BATCH_DELAY_MS = 2500;
+const mediaBatch = new Map(); // chatId -> { items, caption, ctx, timer, statusMsgId }
+
+async function enqueueMedia(ctx, item) {
+  if (!isOwner(ctx)) return;
+  const key = String(ctx.chat.id);
+  let batch = mediaBatch.get(key);
+
+  if (batch) {
+    // Add to existing batch, restart timer
+    batch.items.push(item);
+    if (item.caption && !batch.caption) batch.caption = item.caption;
+    batch.ctx = ctx;
+    clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => processMediaBatch(key), MEDIA_BATCH_DELAY_MS);
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, batch.statusMsgId,
+        `Принимаю файлы... (${batch.items.length} шт) ⏳`);
+    } catch {}
+    return;
+  }
+
+  // First item — create new batch
+  const statusMsg = await ctx.reply(`Принимаю файл... ⏳`);
+  batch = {
+    items: [item],
+    caption: item.caption || null,
+    chatId: ctx.chat.id,
+    userId: String(ctx.from.id),
+    statusMsgId: statusMsg.message_id,
+    ctx,
+    timer: null,
+  };
+  batch.timer = setTimeout(() => processMediaBatch(key), MEDIA_BATCH_DELAY_MS);
+  mediaBatch.set(key, batch);
+}
+
+async function processMediaBatch(key) {
+  const batch = mediaBatch.get(key);
+  if (!batch) return;
+  mediaBatch.delete(key);
+  clearTimeout(batch.timer);
+
+  const { ctx, items, userId, chatId, statusMsgId } = batch;
+
+  try {
+    await ctx.api.editMessageText(chatId, statusMsgId,
+      `Скачиваю ${items.length === 1 ? "файл" : items.length + " файлов"}... ⏳`);
+  } catch {}
+
+  // Download all files
+  const downloaded = [];
+  for (const it of items) {
+    try {
+      const path = await downloadAndSave(ctx, it.fileId, it.ext);
+      downloaded.push({ ...it, path });
+      console.log(`[media] ${userId} saved ${it.kind} -> ${path}`);
+    } catch (e) {
+      console.warn(`[media] download failed for ${it.kind}: ${e.message}`);
+    }
+  }
+
+  if (downloaded.length === 0) {
+    try {
+      await ctx.api.editMessageText(chatId, statusMsgId, "Не удалось скачать файлы. Попробуй ещё раз.");
+    } catch {}
+    return;
+  }
+
+  // Build prompt with file paths
+  const filesBlock = downloaded
+    .map((d) => {
+      const label = d.kind === "photo" ? "Фото" : d.kind === "video" ? "Видео" : `Файл (${d.fileName || d.ext})`;
+      return `${label}: ${d.path}`;
+    })
+    .join("\n");
+
+  const mediaIntro = downloaded.length === 1
+    ? "Пользователь отправил медиа. Файл сохранён — открой через Read:"
+    : `Пользователь отправил ${downloaded.length} медиа. Файлы сохранены — открой через Read:`;
+
+  const caption = batch.caption || "";
+  const prompt = `${mediaIntro}\n${filesBlock}${caption ? `\n\nПодпись пользователя: ${caption}` : ""}`;
+
+  try {
+    await ctx.api.editMessageText(chatId, statusMsgId, "Думаю... ⏳");
+  } catch {}
+
+  const typingInterval = setInterval(() => {
+    ctx.api.sendChatAction(chatId, "typing").catch(() => {});
+  }, 4000);
+
+  try {
+    const sessionId = sessions.get(userId) || null;
+    const result = await callClaude(prompt, sessionId);
+
+    if (result.sessionId) {
+      sessions.set(userId, result.sessionId);
+      saveSessions();
+    }
+
+    clearInterval(typingInterval);
+    await ctx.api.deleteMessage(chatId, statusMsgId).catch(() => {});
+    await sendResponse(ctx, result.text);
+  } catch (err) {
+    clearInterval(typingInterval);
+    await ctx.api.deleteMessage(chatId, statusMsgId).catch(() => {});
+    console.error("[media-error]", err.message);
+    await ctx.reply("Ошибка обработки медиа. Попробуй ещё раз или нажми 🔄 Новый диалог.", { reply_markup: mainKeyboard });
+  }
+}
+
+// ─── VOICE HANDLING ──────────────────────────────────────────────────────────
 
 async function transcribeVoice(filePath) {
   const apiKey = process.env.DEEPGRAM_API_KEY;
@@ -239,6 +378,12 @@ function getStatusText() {
     if (dirs.length > 0) projectsList = dirs.join(", ");
   } catch {}
 
+  // Count media files
+  let mediaCount = 0;
+  try {
+    mediaCount = readdirSync(MEDIA_DIR).length;
+  } catch {}
+
   const today = new Date().toISOString().split("T")[0];
   const hasDiary = existsSync(join(WORKSPACE, "memory", `${today}.md`));
 
@@ -247,6 +392,7 @@ function getStatusText() {
     `DNA-файлы: ${found.length}/4 (${found.join(", ")})\n` +
     `${missing.length > 0 ? `Не найдены: ${missing.join(", ")}\n` : ""}` +
     `Дневник сегодня: ${hasDiary ? "есть" : "нет"}\n` +
+    `Медиафайлов: ${mediaCount}\n` +
     `Проекты: ${projectsList}\n\n` +
     `Workspace: ${WORKSPACE}\n` +
     `Проекты: ${PROJECTS}`
@@ -327,9 +473,10 @@ bot.api.config.use(autoRetry());
 
 // /start
 bot.command("start", async (ctx) => {
+  if (!isOwner(ctx)) return;
   await ctx.reply(
     "Привет! Я твой персональный AI-агент.\n\n" +
-    "Пиши мне текстом или отправляй голосовые — я помогу с любыми задачами.\n\n" +
+    "Пиши мне текстом, отправляй голосовые, фото или файлы — я помогу с любыми задачами.\n\n" +
     "Используй кнопки внизу или просто пиши.",
     { reply_markup: mainKeyboard }
   );
@@ -337,6 +484,7 @@ bot.command("start", async (ctx) => {
 
 // /reset
 bot.command("reset", async (ctx) => {
+  if (!isOwner(ctx)) return;
   const userId = String(ctx.from.id);
   sessions.delete(userId);
   saveSessions();
@@ -345,15 +493,18 @@ bot.command("reset", async (ctx) => {
 
 // /status
 bot.command("status", async (ctx) => {
+  if (!isOwner(ctx)) return;
   await ctx.reply(getStatusText(), { reply_markup: mainKeyboard });
 });
 
 // Button handlers
 bot.hears("📋 Статус", async (ctx) => {
+  if (!isOwner(ctx)) return;
   await ctx.reply(getStatusText(), { reply_markup: mainKeyboard });
 });
 
 bot.hears("🔄 Новый диалог", async (ctx) => {
+  if (!isOwner(ctx)) return;
   const userId = String(ctx.from.id);
   sessions.delete(userId);
   saveSessions();
@@ -361,15 +512,54 @@ bot.hears("🔄 Новый диалог", async (ctx) => {
 });
 
 bot.hears("📁 Проекты", async (ctx) => {
+  if (!isOwner(ctx)) return;
   await ctx.reply(getProjectsText(), { reply_markup: mainKeyboard });
 });
 
 bot.hears("🧠 Память", async (ctx) => {
+  if (!isOwner(ctx)) return;
   await ctx.reply(getMemoryText(), { reply_markup: mainKeyboard });
+});
+
+// Handle photos (single or media group)
+bot.on("message:photo", async (ctx) => {
+  const photo = ctx.message.photo[ctx.message.photo.length - 1]; // largest size
+  await enqueueMedia(ctx, {
+    kind: "photo",
+    fileId: photo.file_id,
+    ext: ".jpg",
+    caption: ctx.message.caption || null,
+  });
+});
+
+// Handle documents (PDF, DOCX, etc.)
+bot.on("message:document", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const doc = ctx.message.document;
+  const ext = doc.file_name ? "." + doc.file_name.split(".").pop() : ".bin";
+  await enqueueMedia(ctx, {
+    kind: "document",
+    fileId: doc.file_id,
+    ext,
+    fileName: doc.file_name,
+    caption: ctx.message.caption || null,
+  });
+});
+
+// Handle video
+bot.on("message:video", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  await enqueueMedia(ctx, {
+    kind: "video",
+    fileId: ctx.message.video.file_id,
+    ext: ".mp4",
+    caption: ctx.message.caption || null,
+  });
 });
 
 // Handle text messages
 bot.on("message:text", async (ctx) => {
+  if (!isOwner(ctx)) return;
   const userId = String(ctx.from.id);
   const text = ctx.message.text;
 
@@ -400,6 +590,7 @@ bot.on("message:text", async (ctx) => {
 
 // Handle voice messages
 bot.on("message:voice", async (ctx) => {
+  if (!isOwner(ctx)) return;
   if (!process.env.DEEPGRAM_API_KEY) {
     return ctx.reply("Голосовые пока не поддерживаются. Нужен DEEPGRAM_API_KEY в .env", { reply_markup: mainKeyboard });
   }
@@ -413,7 +604,7 @@ bot.on("message:voice", async (ctx) => {
     const file = await ctx.getFile();
     const tmpPath = `/tmp/voice_${ctx.from.id}_${Date.now()}.ogg`;
     const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-    await downloadFile(fileUrl, tmpPath);
+    await downloadTgFile(fileUrl, tmpPath);
 
     const transcript = await transcribeVoice(tmpPath);
     unlinkSync(tmpPath);
@@ -452,6 +643,10 @@ bot.on("message:voice", async (ctx) => {
 bot.catch((err) => console.error("[bot-error]", err.message));
 
 bot.start({
-  onStart: () => console.log(`Agent bot started (workspace: ${WORKSPACE}, projects: ${PROJECTS})`),
+  onStart: () => {
+    console.log(`Agent bot started (workspace: ${WORKSPACE}, projects: ${PROJECTS})`);
+    if (OWNER_ID) console.log(`Owner: ${OWNER_ID} (only owner can use bot)`);
+    else console.log("Warning: OWNER_ID not set — bot accepts messages from anyone");
+  },
   drop_pending_updates: true,
 });
