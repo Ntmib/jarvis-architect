@@ -62,11 +62,15 @@ function loadState() {
   try {
     return JSON.parse(readFileSync(STATE_FILE, "utf8"));
   } catch {
+    // No state.json — check if this is an existing user (has DNA files)
+    const hasExistingFiles = existsSync(join(WORKSPACE, "USER.md")) ||
+                             existsSync(join(WORKSPACE, "SOUL.md")) ||
+                             existsSync(join(WORKSPACE, "MEMORY.md"));
     return {
       model: "sonnet",
       mode: "normal",
       timezone: "Europe/Moscow",
-      bootstrapDone: false,
+      bootstrapDone: hasExistingFiles, // skip bootstrap for existing users
       dailySpendLimit: 50,
       costHistory: {},
       featureFlags: {},
@@ -1246,8 +1250,15 @@ function formatBootstrapSummary(data) {
 function writeDNAFiles(data) {
   const today = new Date().toISOString().slice(0, 10);
 
-  // USER.md
-  writeFileSync(join(WORKSPACE, "USER.md"),
+  // Helper: write only if file doesn't exist (protect existing user data on update)
+  const writeIfNew = (filename, content) => {
+    const filepath = join(WORKSPACE, filename);
+    if (!existsSync(filepath)) {
+      writeFileSync(filepath, content);
+    }
+  };
+
+  writeIfNew("USER.md",
 `# Клиент
 
 Имя: ${data.name}
@@ -1266,8 +1277,7 @@ ${data.tasks}
 ${data.stack}
 `);
 
-  // MEMORY.md
-  writeFileSync(join(WORKSPACE, "MEMORY.md"),
+  writeIfNew("MEMORY.md",
 `# Клиент
 
 Имя: ${data.name}
@@ -1286,8 +1296,7 @@ ${data.stack}
 - Стиль общения: ${data.style}
 `);
 
-  // MISSION.md
-  writeFileSync(join(WORKSPACE, "MISSION.md"),
+  writeIfNew("MISSION.md",
 `# Миссия
 
 ${data.mission}
@@ -1298,8 +1307,7 @@ ${data.mission}
 Сфера: ${data.sphere}
 `);
 
-  // GOALS.md
-  writeFileSync(join(WORKSPACE, "GOALS.md"),
+  writeIfNew("GOALS.md",
 `# Цели и задачи
 
 Последнее обновление: ${today}
@@ -1312,8 +1320,7 @@ ${data.tasks}
 (заполняется по мере работы)
 `);
 
-  // PROJECTS.md
-  writeFileSync(join(WORKSPACE, "PROJECTS.md"),
+  writeIfNew("PROJECTS.md",
 `# Проекты
 
 Последнее обновление: ${today}
@@ -1327,8 +1334,7 @@ ${data.tasks}
 (завершённые проекты)
 `);
 
-  // PREFERENCES.md
-  writeFileSync(join(WORKSPACE, "PREFERENCES.md"),
+  writeIfNew("PREFERENCES.md",
 `# Предпочтения
 
 ## Стиль общения
@@ -1341,16 +1347,13 @@ ${data.stack}
 (уточняется по мере работы)
 `);
 
-  // LEARNED.md
-  writeFileSync(join(WORKSPACE, "LEARNED.md"),
+  writeIfNew("LEARNED.md",
 `# Что я узнал
 
 (заполняется агентом по мере работы — паттерны, предпочтения, инсайты)
 `);
 
-  // SOUL.md — don't overwrite if exists (install.sh already created it)
-  if (!existsSync(join(WORKSPACE, "SOUL.md"))) {
-    writeFileSync(join(WORKSPACE, "SOUL.md"),
+  writeIfNew("SOUL.md",
 `# Личность агента
 
 Я — персональный AI-агент ${data.name}.
@@ -1361,7 +1364,6 @@ ${data.stack}
 - Действие важнее описания
 - Конкретика важнее полноты
 `);
-  }
 }
 
 // ─── TEXT BATCHING (collect multiple messages before sending) ────────────────
