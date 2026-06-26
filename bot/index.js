@@ -2126,6 +2126,39 @@ const CODE_BIN = "/usr/local/bin/code";
 // chatId → { proc, cancelled } для активного OAuth-флоу (даёт отмену через кнопку)
 const connectProcs = new Map();
 
+// agent-XXXXXXXX — первые 8 hex от md5(OWNER_ID), детерминированно для ученика.
+// Имя туннеля должно быть устойчивым между перезапусками бота, чтобы VS Code
+// видел один и тот же tunnel при ре-подключении.
+function vscodeTunnelName() {
+  if (!_ownerId) return "agent-noowner";
+  const hex = createHash("md5").update(String(_ownerId)).digest("hex").slice(0, 8);
+  return `agent-${hex}`;
+}
+
+// "23 июн., 09:31 UTC (~5ч 12м назад)"
+function formatTunnelTimeAgo(iso) {
+  try {
+    const dt = new Date(iso);
+    const dateStr = dt.toLocaleDateString("ru-RU", { day: "numeric", month: "short", timeZone: "UTC" });
+    const timeStr = dt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+    const diffMs = Date.now() - dt.getTime();
+    const totalMin = Math.max(0, Math.floor(diffMs / 60000));
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    const ago = h > 0 ? `~${h}ч ${m}м назад` : `~${m}м назад`;
+    return `${dateStr}, ${timeStr} UTC (${ago})`;
+  } catch {
+    return iso;
+  }
+}
+
+// systemctl is-active --quiet через exec (без блокировки event loop)
+function isTunnelServiceActive() {
+  return new Promise((resolve) => {
+    execFile("systemctl", ["is-active", "--quiet", TUNNEL_SERVICE], (err) => resolve(!err));
+  });
+}
+
 // ─── START ────────────────────────────────────────────────────────────────────
 
 bot.catch((err) => {
