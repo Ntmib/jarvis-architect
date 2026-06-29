@@ -1996,159 +1996,6 @@ bot.on("message:video", async (ctx) => {
   });
 });
 
-// Handle text messages
-bot.on("message:text", async (ctx) => {
-  if (!isOwner(ctx)) return;
-
-  const text = ctx.message.text;
-
-  // Reauth flow: highest priority — юзер вставляет URL с ?code=...
-  if (reauthSessions.has(String(ctx.from.id))) {
-    const handled = await completeReauthFlow(ctx, text);
-    if (handled) return;
-  }
-
-  // Если ждём ввод секрета — обработать и не передавать в Claude
-  if (await handlePendingInput(ctx)) return;
-
-  // Bootstrap intercept — if wizard is active, handle answers
-  if (await handleBootstrap(ctx, text)) return;
-
-  // Text batching — collect rapid messages (1.5s window)
-  enqueueText(ctx, text);
-});
-
-// Core text handler (called from batch processor or directly)
-async function handleTextMessage(ctx, text) {
-  const userId = String(ctx.from.id);
-
-  const thinkingMsg = await ctx.reply(formatThinkingPhrase(0, 0));
-  const status = new StatusMessage(ctx, thinkingMsg.message_id);
-  _activeStatus = status;
-  status.start();
-
-  try {
-    // Pre-fetch URLs in message (including Google Docs/Sheets)
-    const urlContext = await prefetchUrls(text);
-    const enrichedPrompt = urlContext ? text + urlContext : text;
-
-    const sessionId = sessions.get(userId) || null;
-    let result = await callClaude(enrichedPrompt, sessionId);
-
-    if (result.sessionId) {
-      sessions.set(userId, result.sessionId);
-      saveSessions();
-    }
-
-    // Auto-continue: if response looks truncated, send continuation
-    let autoContinues = 0;
-    while (autoContinues < 3 && isResponseTruncated(result.text)) {
-      autoContinues++;
-      console.log(`[auto-continue] Attempt ${autoContinues} for session ${result.sessionId}`);
-      const contResult = await callClaude("Продолжай.", result.sessionId);
-      if (contResult.sessionId) {
-        sessions.set(userId, contResult.sessionId);
-        saveSessions();
-      }
-      result.text += "\n\n" + contResult.text;
-      result.sessionId = contResult.sessionId || result.sessionId;
-    }
-
-    status.stop();
-    _activeStatus = null;
-    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
-    await sendResponse(ctx, result.text);
-  } catch (err) {
-    status.stop();
-    _activeStatus = null;
-    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
-    console.error("[error]", err.message);
-
-    // Check for rate limit
-    const match = err.message.match(/retry.after.*?(\d+)/i);
-    if (match) setGlobalRateLimit(parseInt(match[1]));
-
-    const friendly = humanizeError(err.message);
-    await ctx.reply(friendly || "Произошла ошибка. Попробуй ещё раз или нажми 🔄 Новый диалог.");
-  }
-}
-
-// Auto-continue detection: response looks cut off mid-sentence
-function isResponseTruncated(text) {
-  if (!text || text.length < 200) return false;
-  const trimmed = text.trimEnd();
-  // Ends mid-word, mid-code-block, or with ellipsis-like patterns
-  if (trimmed.match(/```[^`]*$/)) return true; // unclosed code block
-  const lastChar = trimmed[trimmed.length - 1];
-  // Normal endings
-  if (".!?)>\"':;".includes(lastChar)) return false;
-  // Ends with a letter/digit mid-sentence — likely truncated
-  if (/[\w\u0400-\u04FF]$/.test(trimmed)) return true;
-  return false;
-}
-
-// Handle voice messages
-bot.on("message:voice", async (ctx) => {
-  if (!isOwner(ctx)) return;
-
-  const thinkingMsg = await ctx.reply("Слушаю голосовое… 🎤");
-  const status = new StatusMessage(ctx, thinkingMsg.message_id);
-  _activeStatus = status;
-  status.start();
-
-  try {
-    const file = await ctx.getFile();
-    const tmpPath = `/tmp/voice_${ctx.from.id}_${Date.now()}.ogg`;
-    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-    await downloadTgFile(fileUrl, tmpPath);
-
-    const transcript = await transcribeVoice(tmpPath);
-    try { unlinkSync(tmpPath); } catch {}
-
-    if (!transcript) {
-      status.stop();
-      _activeStatus = null;
-      await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
-
-      if (!hasAnyTranscriber()) {
-        return ctx.reply(VOICE_FALLBACK_PROMPT, {
-          parse_mode: "HTML",
-          reply_markup: voiceFallbackKeyboard(),
-        });
-      }
-
-      return ctx.reply(
-        "Не получилось распознать на этот раз. Попробуй ещё раз или отправь текстом.",
-        {}
-      );
-    }
-
-    await ctx.api.editMessageText(ctx.chat.id, thinkingMsg.message_id,
-      `Распознано: "${transcript.slice(0, 100)}${transcript.length > 100 ? "..." : ""}"\n\n${formatThinkingPhrase(1, 0)}`);
-
-    const userId = String(ctx.from.id);
-    const sessionId = sessions.get(userId) || null;
-    const result = await callClaude(transcript, sessionId);
-
-    if (result.sessionId) {
-      sessions.set(userId, result.sessionId);
-      saveSessions();
-    }
-
-    status.stop();
-    _activeStatus = null;
-    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
-    await sendResponse(ctx, result.text);
-  } catch (err) {
-    status.stop();
-    _activeStatus = null;
-    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
-    console.error("[voice-error]", err.message);
-    const friendly = humanizeError(err.message);
-    await ctx.reply(friendly || "Ошибка обработки голосового. Попробуй текстом.");
-  }
-});
-
 // ─── VS CODE TUNNEL (/connect) ────────────────────────────────────────────────
 // Портировано из agent-factory@3c47c37 (v4.6).
 // Архитектура root-делегата через path-юниты:
@@ -2597,6 +2444,159 @@ bot.callbackQuery("connect:disconnect", async (ctx) => {
     await ctx.editMessageText("⏹ VS Code туннель отключён.\n\nДля повторного подключения: /connect");
   } catch (err) {
     await ctx.editMessageText(`❌ Ошибка при отключении: ${err.message}`);
+  }
+});
+
+// Handle text messages
+bot.on("message:text", async (ctx) => {
+  if (!isOwner(ctx)) return;
+
+  const text = ctx.message.text;
+
+  // Reauth flow: highest priority — юзер вставляет URL с ?code=...
+  if (reauthSessions.has(String(ctx.from.id))) {
+    const handled = await completeReauthFlow(ctx, text);
+    if (handled) return;
+  }
+
+  // Если ждём ввод секрета — обработать и не передавать в Claude
+  if (await handlePendingInput(ctx)) return;
+
+  // Bootstrap intercept — if wizard is active, handle answers
+  if (await handleBootstrap(ctx, text)) return;
+
+  // Text batching — collect rapid messages (1.5s window)
+  enqueueText(ctx, text);
+});
+
+// Core text handler (called from batch processor or directly)
+async function handleTextMessage(ctx, text) {
+  const userId = String(ctx.from.id);
+
+  const thinkingMsg = await ctx.reply(formatThinkingPhrase(0, 0));
+  const status = new StatusMessage(ctx, thinkingMsg.message_id);
+  _activeStatus = status;
+  status.start();
+
+  try {
+    // Pre-fetch URLs in message (including Google Docs/Sheets)
+    const urlContext = await prefetchUrls(text);
+    const enrichedPrompt = urlContext ? text + urlContext : text;
+
+    const sessionId = sessions.get(userId) || null;
+    let result = await callClaude(enrichedPrompt, sessionId);
+
+    if (result.sessionId) {
+      sessions.set(userId, result.sessionId);
+      saveSessions();
+    }
+
+    // Auto-continue: if response looks truncated, send continuation
+    let autoContinues = 0;
+    while (autoContinues < 3 && isResponseTruncated(result.text)) {
+      autoContinues++;
+      console.log(`[auto-continue] Attempt ${autoContinues} for session ${result.sessionId}`);
+      const contResult = await callClaude("Продолжай.", result.sessionId);
+      if (contResult.sessionId) {
+        sessions.set(userId, contResult.sessionId);
+        saveSessions();
+      }
+      result.text += "\n\n" + contResult.text;
+      result.sessionId = contResult.sessionId || result.sessionId;
+    }
+
+    status.stop();
+    _activeStatus = null;
+    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
+    await sendResponse(ctx, result.text);
+  } catch (err) {
+    status.stop();
+    _activeStatus = null;
+    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
+    console.error("[error]", err.message);
+
+    // Check for rate limit
+    const match = err.message.match(/retry.after.*?(\d+)/i);
+    if (match) setGlobalRateLimit(parseInt(match[1]));
+
+    const friendly = humanizeError(err.message);
+    await ctx.reply(friendly || "Произошла ошибка. Попробуй ещё раз или нажми 🔄 Новый диалог.");
+  }
+}
+
+// Auto-continue detection: response looks cut off mid-sentence
+function isResponseTruncated(text) {
+  if (!text || text.length < 200) return false;
+  const trimmed = text.trimEnd();
+  // Ends mid-word, mid-code-block, or with ellipsis-like patterns
+  if (trimmed.match(/```[^`]*$/)) return true; // unclosed code block
+  const lastChar = trimmed[trimmed.length - 1];
+  // Normal endings
+  if (".!?)>\"':;".includes(lastChar)) return false;
+  // Ends with a letter/digit mid-sentence — likely truncated
+  if (/[\w\u0400-\u04FF]$/.test(trimmed)) return true;
+  return false;
+}
+
+// Handle voice messages
+bot.on("message:voice", async (ctx) => {
+  if (!isOwner(ctx)) return;
+
+  const thinkingMsg = await ctx.reply("Слушаю голосовое… 🎤");
+  const status = new StatusMessage(ctx, thinkingMsg.message_id);
+  _activeStatus = status;
+  status.start();
+
+  try {
+    const file = await ctx.getFile();
+    const tmpPath = `/tmp/voice_${ctx.from.id}_${Date.now()}.ogg`;
+    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+    await downloadTgFile(fileUrl, tmpPath);
+
+    const transcript = await transcribeVoice(tmpPath);
+    try { unlinkSync(tmpPath); } catch {}
+
+    if (!transcript) {
+      status.stop();
+      _activeStatus = null;
+      await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
+
+      if (!hasAnyTranscriber()) {
+        return ctx.reply(VOICE_FALLBACK_PROMPT, {
+          parse_mode: "HTML",
+          reply_markup: voiceFallbackKeyboard(),
+        });
+      }
+
+      return ctx.reply(
+        "Не получилось распознать на этот раз. Попробуй ещё раз или отправь текстом.",
+        {}
+      );
+    }
+
+    await ctx.api.editMessageText(ctx.chat.id, thinkingMsg.message_id,
+      `Распознано: "${transcript.slice(0, 100)}${transcript.length > 100 ? "..." : ""}"\n\n${formatThinkingPhrase(1, 0)}`);
+
+    const userId = String(ctx.from.id);
+    const sessionId = sessions.get(userId) || null;
+    const result = await callClaude(transcript, sessionId);
+
+    if (result.sessionId) {
+      sessions.set(userId, result.sessionId);
+      saveSessions();
+    }
+
+    status.stop();
+    _activeStatus = null;
+    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
+    await sendResponse(ctx, result.text);
+  } catch (err) {
+    status.stop();
+    _activeStatus = null;
+    await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => {});
+    console.error("[voice-error]", err.message);
+    const friendly = humanizeError(err.message);
+    await ctx.reply(friendly || "Ошибка обработки голосового. Попробуй текстом.");
   }
 });
 
