@@ -19,3 +19,6 @@ Thumbs.db
 
 # Claude Code локальные настройки
 .claude/settings.local.json
+
+bot/node_modules/
+.media/
