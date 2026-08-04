@@ -45,6 +45,7 @@ const DATA_DIR = join(AGENT_HOME, ".agent");
 const MEDIA_DIR = join(WORKSPACE, ".media");
 const SESSIONS_FILE = join(DATA_DIR, "sessions.json");
 const OWNER_FILE = join(DATA_DIR, "owner.json");
+const BUSINESS_FILE = join(DATA_DIR, "business_connections.json");
 const SYSTEM_PROMPT_PATH = join(WORKSPACE, "CLAUDE.md");
 const CRASH_CONTEXT_FILE = join(DATA_DIR, ".crash_context.md");
 const STATE_FILE = join(DATA_DIR, "state.json");
@@ -245,6 +246,25 @@ loadOwner();
 function isOwner(ctx) {
   if (!_ownerId) return false; // No owner yet — only /start can set it
   return String(ctx.from?.id) === String(_ownerId);
+}
+
+// --- Telegram Business support ---
+// Lets the owner connect this bot via Settings -> Telegram Business -> Chatbots
+// (requires Telegram Premium) so the bot can answer clients directly in the
+// owner's personal chats. See BUSINESS_MESSAGES_PATCH.md for design notes.
+let _businessConnections = {}; // business_connection_id -> { ownerId, isEnabled }
+
+function loadBusinessConnections() {
+  try {
+    _businessConnections = JSON.parse(readFileSync(BUSINESS_FILE, "utf8"));
+  } catch {
+    _businessConnections = {};
+  }
+}
+loadBusinessConnections();
+
+function saveBusinessConnections() {
+  writeFileSync(BUSINESS_FILE, JSON.stringify(_businessConnections, null, 2));
 }
 
 // ─── SPEND TRACKING ─────────────────────────────────────────────────────────
@@ -2597,6 +2617,61 @@ bot.on("message:voice", async (ctx) => {
     console.error("[voice-error]", err.message);
     const friendly = humanizeError(err.message);
     await ctx.reply(friendly || "Ошибка обработки голосового. Попробуй текстом.");
+  }
+});
+
+// --- Telegram Business handlers ---
+// Fired when the owner connects/disconnects this bot via
+// Settings -> Telegram Business -> Chatbots (needs Telegram Premium).
+bot.on("business_connection", async (ctx) => {
+  const conn = ctx.businessConnection;
+  const ownerMatches = String(conn.user.id) === String(_ownerId);
+  if (!ownerMatches) return; // connection made by someone other than the bot's owner
+
+  _businessConnections[conn.id] = {
+    ownerId: String(conn.user.id),
+    isEnabled: conn.is_enabled,
+  };
+  saveBusinessConnections();
+  console.log(`[business] connection ${conn.id} — enabled: ${conn.is_enabled}`);
+});
+
+// Fired for every new message in one of the owner's personal chats, sent by a
+// CLIENT (not the owner) once Business chatbot access is enabled for that chat.
+// NOTE: ctx.from here is the client, so isOwner(ctx) must NOT be used — the
+// connection's business_connection_id is the source of trust instead.
+bot.on("business_message", async (ctx) => {
+  const msg = ctx.businessMessage;
+  const connId = msg.business_connection_id;
+  const conn = _businessConnections[connId];
+  if (!conn || !conn.isEnabled) return; // unknown or disabled connection — ignore
+
+  const clientText = msg.text;
+  if (!clientText) return; // photos/voice from clients: not handled yet (see BUSINESS_MESSAGES_PATCH.md)
+
+  // Separate Claude session per client chat so it never mixes with the
+  // owner's own conversation history with the bot.
+  const sessionKey = `biz_${connId}_${msg.chat.id}`;
+  const sessionId = sessions.get(sessionKey) || null;
+
+  const clientName = msg.from?.first_name || msg.from?.username || "клиент";
+  const prompt = `[Сообщение от ${clientName} в личном Telegram-чате владельца, через Telegram Business]\n\n${clientText}\n\n(Ответь клиенту от лица владельца бота, коротко и по делу — это переписка с клиентом, не с самим владельцем)`;
+
+  try {
+    const result = await callClaude(prompt, sessionId);
+    if (result.sessionId) {
+      sessions.set(sessionKey, result.sessionId);
+      saveSessions();
+    }
+    await ctx.api.sendMessage(msg.chat.id, result.text, {
+      business_connection_id: connId,
+    });
+  } catch (err) {
+    console.error("[business-message-error]", err.message);
+    // Deliberately silent to the client on error — a raw "something broke"
+    // message would look bad coming from what the client believes is the
+    // owner personally. See BUSINESS_MESSAGES_PATCH.md for the planned
+    // human-escalation/timeout follow-up.
   }
 });
 
