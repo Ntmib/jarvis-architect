@@ -6,74 +6,12 @@
 1. `index.js` не подписан на апдейты типа `business_message`/`business_connection` — grammY (используемая версия ^1.31.0) их поддерживает технически, но обработчиков для них в коде нет вообще.
 2. Даже если добавить `bot.on("business_message", ...)` "в лоб" — сообщение не пройдёт проверку `isOwner(ctx)` (index.js:245), потому что `ctx.from` в business-сообщении — это КЛИЕНТ, который пишет владельцу, а не сам владелец. Нужна отдельная проверка: сообщение принадлежит business-подключению, которое установил именно владелец.
 
-## Что нужно добавить (код ниже, вставить после блока `loadOwner()` / рядом с `isOwner`, до `bot.on("message:text", ...)`)
-
-```js
-// --- Telegram Business support ---
-const BUSINESS_FILE = join(DATA_DIR, "business_connections.json");
-let _businessConnections = {}; // business_connection_id -> { ownerId, isEnabled }
-
-function loadBusinessConnections() {
-  try {
-    _businessConnections = JSON.parse(readFileSync(BUSINESS_FILE, "utf8"));
-  } catch {
-    _businessConnections = {};
-  }
-}
-loadBusinessConnections();
-
-function saveBusinessConnections() {
-  writeFileSync(BUSINESS_FILE, JSON.stringify(_businessConnections, null, 2));
-}
-
-// Приходит, когда владелец подключает/отключает бота в Настройки → Telegram Business
-bot.on("business_connection", async (ctx) => {
-  const conn = ctx.businessConnection;
-  const ownerMatches = String(conn.user.id) === String(_ownerId);
-  if (!ownerMatches) return; // подключение не от владельца этого бота — игнорируем
-
-  _businessConnections[conn.id] = {
-    ownerId: String(conn.user.id),
-    isEnabled: conn.is_enabled,
-  };
-  saveBusinessConnections();
-  console.log(`[business] connection ${conn.id} — enabled: ${conn.is_enabled}`);
-});
-
-// Приходит новое сообщение в личном чате владельца (от клиента)
-bot.on("business_message", async (ctx) => {
-  const msg = ctx.businessMessage;
-  const connId = msg.business_connection_id;
-  const conn = _businessConnections[connId];
-  if (!conn || !conn.isEnabled) return; // не наше подключение, или выключено
-
-  // ВАЖНО: msg.from — это КЛИЕНТ, а не владелец. Не пропускать через isOwner().
-  const clientText = msg.text;
-  if (!clientText) return; // пока только текст, фото/голос — отдельная доработка
-
-  // Отдельная сессия Claude на каждый чат клиента, чтобы не путать с личным диалогом владельца
-  const sessionKey = `biz_${connId}_${msg.chat.id}`;
-  const sessionId = sessions.get(sessionKey) || null;
-
-  // ВАЖНО: промпт должен явно объяснять контекст — иначе Claude будет отвечать
-  // так, как будто разговаривает с самой Евгенией, а не с её клиентом от её имени.
-  const prompt = `[Сообщение от клиента ${msg.from.first_name || msg.from.username || "без имени"} в твоём личном Telegram-чате, через Business-подключение]\n\n${clientText}\n\n(Ответь клиенту от лица Евгении, коротко и по делу — это переписка с клиентом, не разговор с самой Евгенией)`;
-
-  try {
-    const result = await callClaude(prompt, sessionId);
-    if (result.sessionId) {
-      sessions.set(sessionKey, result.sessionId);
-      saveSessions();
-    }
-    await ctx.api.sendMessage(msg.chat.id, result.text, {
-      business_connection_id: connId,
-    });
-  } catch (err) {
-    console.error("[business message error]", err.message);
-    // Осознанно НЕ шлём ошибку клиенту напрямую — лучше тишина, чем "Произошла ошибка" от имени Евгении
-  }
-});
-```
+## Статус
+РЕАЛИЗОВАНО в этой ветке — код уже вставлен в `index.js` (не только описан здесь):
+- Константа `BUSINESS_FILE` — рядом с `OWNER_FILE`.
+- Хранилище подключений (`_businessConnections`, `loadBusinessConnections`, `saveBusinessConnections`) — сразу после `isOwner()`.
+- Обработчики `bot.on("business_connection", ...)` и `bot.on("business_message", ...)` — сразу после `bot.on("message:voice", ...)`.
+`node --check index.js` пройден (синтаксис корректен). Логика ниже — для объяснения решений, актуальный код смотреть в самом `index.js`.
 
 ## Что нужно проверить/доделать перед боевым использованием (честно, не всё готово "из коробки")
 1. **Формат ответа `sendResponse`/`callClaude`** — код выше использует `result.text` напрямую через `ctx.api.sendMessage`, а не через уже существующую функцию `sendResponse(ctx, text)` (index.js:2511) — потому что `sendResponse` может рассчитывать на обычный `ctx` не от business-сообщения (форматирование, разбивка на части и т.п.). Нужно свериться, работает ли `sendResponse` с `business_connection_id`, или писать упрощённую версию для этого случая.
