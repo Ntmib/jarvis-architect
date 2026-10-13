@@ -35,7 +35,9 @@ bash /home/agent/.agent/bot/update-bot.sh
 ## Как поставить с нуля
 
 ```
-curl -sL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh | bash
+wget -O /root/setup-agent.sh https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh
+bash /root/setup-agent.sh
+rm /root/setup-agent.sh
 ```
 
 Дальше всё как раньше: /start в Telegram, бутстрап, через минуту работает.
@@ -45,7 +47,9 @@ curl -sL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-ser
 **update-bot.sh не сработал?**
 Запусти полную переустановку — она идемпотентная, ничего не сломает:
 ```
-curl -sL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh | bash
+wget -O /root/setup-agent.sh https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh
+bash /root/setup-agent.sh
+rm /root/setup-agent.sh
 ```
 
 **/connect пишет «VS Code CLI не установлен»?**

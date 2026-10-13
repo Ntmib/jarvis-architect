@@ -1,0 +1,22 @@
+name: Проверка безопасности шаблона
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  template-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Получить репозиторий
+        uses: actions/checkout@v4
+
+      - name: Проверить отсутствие чужой памяти и опасных настроек
+        run: |
+          python3 scripts/check-template-safety.py
+          python3 -m unittest discover -s tests -v

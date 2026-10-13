@@ -5,11 +5,12 @@ After=network.target
 [Service]
 Type=simple
 User=agent
-WorkingDirectory=/home/agent/.agent/bot
+WorkingDirectory=/opt/agent-bot
 ExecStart=/usr/bin/node index.js
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/agent/.agent/.env
+EnvironmentFile=-/home/agent/.agent/.env
+EnvironmentFile=/etc/agent-bot/env
 
 [Install]
 WantedBy=multi-user.target
