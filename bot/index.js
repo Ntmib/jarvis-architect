@@ -38,6 +38,7 @@ import { safeEnvWrite, safeEnvRemove } from "./lib/env-write.js";
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const PAIRING_CODE = process.env.PAIRING_CODE || null;
 const AGENT_HOME = process.env.AGENT_HOME || "/home/agent";
 const WORKSPACE = join(AGENT_HOME, "workspace");
 const PROJECTS = join(AGENT_HOME, "projects");
@@ -214,9 +215,9 @@ async function sendToOwner(text) {
   }
 }
 
-// ─── OWNER CHECK (auto-lock to first user) ──────────────────────────────────
+// ─── OWNER CHECK (pairing-code lock) ────────────────────────────────────────
 
-// Priority: OWNER_ID env var > owner.json file > auto-lock on first /start
+// Priority: OWNER_ID env var > owner.json file > pairing code on /start
 let _ownerId = process.env.OWNER_ID || null;
 
 function loadOwner() {
@@ -237,7 +238,7 @@ function saveOwner(ctx) {
   };
   _ownerId = data.id;
   writeFileSync(OWNER_FILE, JSON.stringify(data, null, 2));
-  console.log(`[owner] auto-locked to: ${data.id} (${data.name})`);
+  console.log(`[owner] paired to: ${data.id} (${data.name})`);
 }
 
 loadOwner();
@@ -1616,6 +1617,16 @@ function spendLimitKeyboard() {
 const bot = new Bot(BOT_TOKEN);
 bot.api.config.use(autoRetry());
 
+// Старые inline-кнопки не должны работать после перепривязки владельца.
+// Единая проверка стоит до регистрации всех callback-обработчиков.
+bot.use(async (ctx, next) => {
+  if (ctx.callbackQuery && !isOwner(ctx)) {
+    await ctx.answerCallbackQuery({ text: "Доступ запрещён", show_alert: true }).catch(() => {});
+    return;
+  }
+  await next();
+});
+
 // Env callbacks (модуль secrets-menu.js — только callbacks, не /settings)
 registerSecretsHandlers(bot, isOwner);
 
@@ -1736,8 +1747,15 @@ bot.callbackQuery(/^spend_/, async (ctx) => {
 
 // /start — with bootstrap trigger
 bot.command("start", async (ctx) => {
-  // Auto-lock: first user to /start becomes the owner
   if (!_ownerId) {
+    const suppliedCode = String(ctx.match || "").trim();
+    if (!PAIRING_CODE || suppliedCode !== PAIRING_CODE) {
+      await ctx.reply(
+        "Бот ещё не привязан к владельцу. Откройте консоль VPS и отправьте " +
+        "команду /start с кодом, который показал установщик."
+      );
+      return;
+    }
     saveOwner(ctx);
   }
   if (!isOwner(ctx)) return;
@@ -1881,34 +1899,21 @@ bot.command("update", async (ctx) => {
       return;
     }
 
-    await ctx.reply(`Доступна версия ${remoteVer}. Обновляю...`);
-
-    // Run update-bot.sh
-    const botDir = import.meta.dirname;
-    const updateScript = join(botDir, "update-bot.sh");
-
-    // If update-bot.sh doesn't exist yet, download it first
-    if (!existsSync(updateScript)) {
-      execSync(
-        `curl -fsSL "https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/bot/update-bot.sh" -o "${updateScript}" && chmod +x "${updateScript}"`,
-        { timeout: 15000 }
-      );
-    }
-
-    // Run the update script (it will restart the bot via systemd)
-    const result = execSync(`bash "${updateScript}" 2>&1`, {
-      timeout: 120000,
-      cwd: botDir,
-    }).toString();
-
-    // If we get here, the bot hasn't restarted yet (no systemd)
-    const lines = result.split("\n").filter(l => l.includes("===") || l.includes("ERROR") || l.includes("WARN"));
-    await ctx.reply(lines.join("\n") || "Обновление завершено. Бот перезапустится.");
+    await ctx.reply(
+      `Доступна версия ${remoteVer}.\n\n` +
+      "Обновление кода выполняется только из root-консоли VPS, потому что " +
+      "файлы бота защищены от изменения обычным пользователем. Выполните:\n\n" +
+      "wget -O /root/setup-agent-bot.sh https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-bot.sh\n" +
+      "bash /root/setup-agent-bot.sh\n" +
+      "rm /root/setup-agent-bot.sh"
+    );
+    return;
 
   } catch (err) {
     console.error("[update]", err.message);
     await ctx.reply(
-      `Ошибка обновления: ${err.message.slice(0, 200)}\n\nПопробуй вручную:\nbash update-bot.sh`,
+      `Ошибка проверки обновления: ${err.message.slice(0, 200)}\n\n` +
+      "Попробуйте позже или переустановите бот через setup-bot.sh в root-консоли VPS.",
       {}
     );
   }
@@ -2295,8 +2300,9 @@ bot.command("connect", async (ctx) => {
     await ctx.reply(
       "⚠️ VS Code CLI не установлен на сервере.\n\n" +
       "Похоже что setup-server.sh пропустил установку туннеля (нет интернета или GitHub был недоступен).\n\n" +
-      "Перезапусти установку:\n" +
-      "<code>curl -sL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh | bash</code>",
+      "Перезапусти установку в консоли VPS:\n" +
+      "<code>wget -O /root/setup-agent.sh https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh\n" +
+      "bash /root/setup-agent.sh\nrm /root/setup-agent.sh</code>",
       { parse_mode: "HTML" }
     );
     return;
@@ -2652,7 +2658,7 @@ bot.start({
     console.log(`Agent bot v${BOT_VERSION} started (workspace: ${WORKSPACE}, projects: ${PROJECTS})`);
     console.log(`Model: ${getCurrentModel()}, Bootstrap: ${state.bootstrapDone ? "done" : "pending"}`);
     if (_ownerId) console.log(`Owner: ${_ownerId} (only owner can use bot)`);
-    else console.log("No owner yet — first /start will auto-lock");
+    else console.log("No owner yet — /start requires PAIRING_CODE");
   },
   drop_pending_updates: true,
 });

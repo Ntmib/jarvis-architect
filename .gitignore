@@ -10,6 +10,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Python caches
+__pycache__/
+*.pyc
+
 # Secrets — никогда не коммитим
 .env
 .env.local
@@ -19,6 +23,23 @@ Thumbs.db
 
 # Claude Code локальные настройки
 .claude/settings.local.json
+
+# Личная память Агента — не публикуем по умолчанию
+# Шаблонные файлы уже отслеживаются в этом репозитории, но после установки
+# через degit заполненные данные ученика останутся только на его компьютере.
+SOUL.md
+MEMORY.md
+GOALS.md
+USER.md
+MISSION.md
+PROJECTS.md
+PREFERENCES.md
+LEARNED.md
+SERVICES.md
+memory/**
+!memory/README.md
+knowledge/**
+!knowledge/README.md
 
 bot/node_modules/
 .media/

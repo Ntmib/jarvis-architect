@@ -3,7 +3,7 @@
 # Установка рабочего окружения для AI-агента на VPS
 # Курс «Архитектор нейросотрудников» — Урок 7
 #
-# Запуск: curl -sL https://raw.githubusercontent.com/Ntmib/jarvis-architect/main/setup-server.sh | bash
+# Запуск: скачать файл, проверить адрес и выполнить отдельной командой.
 # ============================================================
 set -euo pipefail
 
@@ -43,7 +43,10 @@ apt-get install -y -qq curl git jq unzip >/dev/null 2>&1
 log "Базовые пакеты установлены"
 
 if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d v) -lt 20 ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+  NODESOURCE_SETUP=$(mktemp /root/nodesource.XXXXXX.sh)
+  curl -fsSL https://deb.nodesource.com/setup_20.x -o "$NODESOURCE_SETUP"
+  bash "$NODESOURCE_SETUP" >/dev/null 2>&1
+  rm -f "$NODESOURCE_SETUP"
   apt-get install -y -qq nodejs >/dev/null 2>&1
 fi
 log "Node.js $(node -v)"
