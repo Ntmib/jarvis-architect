@@ -21,7 +21,7 @@ description: Скачивание видео и аудио с любых пла�
 | Платформа | Actor | Примечание |
 |-----------|-------|-----------|
 | YouTube | `api-ninja/youtube-video-downloader` | Возвращает adaptiveFormats с прямыми URL |
-| YouTube | `logiover/youtube-video-downloader-ppe` | 96% success rate |
+| YouTube | `johnvc/youtube-download-api` | Вход videoUrls; format: video (по умолчанию audio); отдаёт fileUrl на файл |
 | Instagram | `apify/instagram-scraper` | 216K runs |
 | TikTok | `clockworks/tiktok-scraper` | 151K runs |
 
